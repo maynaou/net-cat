@@ -44,14 +44,6 @@ func main() {
 	}
 }
 
-// func checkname(msg string, name string, c net.Conn) string ,{
-// 	msg = "[ENTER YOUR NAME]:"
-// 	c.Write([]byte(msg))
-// 	name, _ = bufio.NewReader(c).ReadString('\n')
-// 	name = strings.TrimSpace(name)
-// 	return name
-// }
-
 // Fonction pour gérer la connexion d'un client
 func handleConnection(c net.Conn) {
 	if len(clients) > 4 {
@@ -84,6 +76,16 @@ func handleConnection(c net.Conn) {
 
 	clientNames[c] = name
 	fmt.Printf("%s has connected.\n", name)
+	for _, client := range clients {
+		if client != c {
+			clientName, exists := clientNames[client]
+			if clientName == name && exists {
+				c.Write([]byte("invalid name!\n"))
+				c.Close()
+				return
+			}
+		}
+	}
 	broadcastMessage(fmt.Sprintf("\n %s has joined our chat...", name), c, timestamp, name)
 	for _, client := range clients {
 		if client != c {
@@ -99,6 +101,7 @@ func handleConnection(c net.Conn) {
 		fmt.Println("Erreur lors de l'écriture dans le fichier :", err)
 		return
 	}
+
 	data, _ = os.ReadFile("archiveData.txt")
 	if data != nil {
 		c.Write(data)
@@ -106,6 +109,7 @@ func handleConnection(c net.Conn) {
 
 	fmt.Printf("Client %s connected\n", c.RemoteAddr().String())
 	for {
+
 		if name == "" {
 			c.Write([]byte("invalid name!\n"))
 			c.Close()
