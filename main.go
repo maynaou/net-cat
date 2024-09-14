@@ -13,27 +13,25 @@ var (
 	clients     []net.Conn // Liste de tous les clients connectés
 	clientNames = make(map[net.Conn]string)
 	archive     string
-	data        []byte
+	timestamp   string
 )
 
 func main() {
-	port := ":8989"
-	if len(os.Args) == 2 {
-		port = ":" + os.Args[1]
-		fmt.Printf("Listening on port %s\n", port)
-	}
-	// Ecouter sur le port spécifié
-	l, err := net.Listen("tcp", port)
+	port := getPort()
+
+	// Écouter sur le port spécifié
+	listener, err := net.Listen("tcp", port)
 	if err != nil {
 		fmt.Println("Error listening:", err)
 		return
 	}
-	defer l.Close()
+	defer listener.Close()
 
-	fmt.Println("Server started. Waiting for clients...")
+	// fmt.Println("Server started. Waiting for clients...")
 
+	// Accepter les connexions des clients
 	for {
-		conn, err := l.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			fmt.Println("Error accepting connection:", err)
 			continue
@@ -44,135 +42,157 @@ func main() {
 	}
 }
 
-// Fonction pour gérer la connexion d'un client
+func getPort() string {
+	port := ":8989"
+	if len(os.Args) == 2 {
+		port = ":" + os.Args[1]
+		fmt.Printf("Listening on port %s\n", port)
+	}
+	return port
+}
+
 func handleConnection(c net.Conn) {
-	if len(clients) > 4 {
+	if checkChatRoomCapacity(c) {
+		return
+	}
+
+	defer c.Close()
+
+	sendWelcomeMessage(c)
+	if !handleClientName(c) {
+		return
+	}
+	os.WriteFile("archiveData.txt", []byte((archive)), 0o644)
+	sendArchivedData(c)
+	fmt.Printf("Client %s connected\n", c.RemoteAddr().String())
+
+	// Gérer les messages du client
+	for {
+		if !processClientMessage(c) {
+			return
+		}
+	}
+}
+
+func checkChatRoomCapacity(c net.Conn) bool {
+	if len(clients) > 3 {
 		c.Write([]byte("Chat room is full. Try again later.\n"))
 		removeClient(c)
 		c.Close()
-		return
+		return true
 	}
-	defer c.Close()
-	message := "Welcome to TCP-Chat!\n"
-	_, err := c.Write([]byte(message))
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	res, _ := os.ReadFile("ascii.txt")
-	res = append(res, byte('\n'))
-	// Envoyer un message de bienvenue au client
-	_, err = c.Write(res)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+	return false
+}
 
-	msg := "[ENTER YOUR NAME]:"
-	c.Write([]byte(msg))
-	var timestamp string
+func sendWelcomeMessage(c net.Conn) {
+	message := "Welcome to TCP-Chat!\n"
+	c.Write([]byte(message))
+
+	asciiArt, _ := os.ReadFile("ascii.txt")
+	asciiArt = append(asciiArt, byte('\n'))
+	c.Write(asciiArt)
+}
+
+func handleClientName(c net.Conn) bool {
+	c.Write([]byte("[ENTER YOUR NAME]: "))
 	name, _ := bufio.NewReader(c).ReadString('\n')
 	name = strings.TrimSpace(name)
 
+	if name == "" || !isValidName(name) {
+		c.Write([]byte("Invalid name!\n"))
+		removeClient(c)
+		c.Close()
+		return false
+	}
+
 	clientNames[c] = name
-	fmt.Printf("%s has connected.\n", name)
+
 	for _, client := range clients {
 		if client != c {
 			clientName, exists := clientNames[client]
 			if clientName == name && exists {
 				c.Write([]byte("invalid name!\n"))
+				removeClient(c)
 				c.Close()
-				return
+				return false
 			}
 		}
 	}
-	broadcastMessage(fmt.Sprintf("\n %s has joined our chat...", name), c, timestamp, name)
+	broadcastMessage(fmt.Sprintf("\n %s has joined our chat...", name), c, "")
+	timestamp = time.Now().Format("2006-01-02 15:04:05")
+	isDuplicateName(name, c, timestamp)
+	return true
+}
+
+func isValidName(name string) bool {
+	for _, char := range name {
+		if char < 32 {
+			return false
+		}
+	}
+	return true
+}
+
+func isDuplicateName(name string, c net.Conn, timestamp string) {
 	for _, client := range clients {
 		if client != c {
 			clientName, exists := clientNames[client]
 			if clientName != name && exists {
-				timestamp = time.Now().Format("2006-01-02 15:04:05")
 				client.Write([]byte(fmt.Sprintf("\n[%s][%s]: ", timestamp, clientName)))
-			}
-		}
-	}
-	err = os.WriteFile("archiveData.txt", []byte((archive)), 0o644)
-	if err != nil {
-		fmt.Println("Erreur lors de l'écriture dans le fichier :", err)
-		return
-	}
-
-	data, _ = os.ReadFile("archiveData.txt")
-	if data != nil {
-		c.Write(data)
-	}
-
-	fmt.Printf("Client %s connected\n", c.RemoteAddr().String())
-	for {
-
-		if name == "" {
-			c.Write([]byte("invalid name!\n"))
-			c.Close()
-			return
-		}
-		for _, char := range name {
-			if char < 32 {
-				c.Write([]byte("invalid name!\n"))
-				c.Close()
-				return
-			}
-		}
-		timestamp = time.Now().Format("2006-01-02 15:04:05")
-		c.Write([]byte(fmt.Sprintf("[%s][%s]: ", timestamp, name)))
-		// Lire le message du client
-		msg := ""
-		message, err := bufio.NewReader(c).ReadString('\n')
-		for _, char := range message {
-			if char < 32 || char > 127 {
-				continue
-			}
-			msg += string(char)
-		}
-		fmt.Println(msg)
-		archive += fmt.Sprintf("[%s][%s]: ", timestamp, name) + msg + "\n"
-		if err != nil {
-			fmt.Printf("%s disconnected.\n", name)
-			removeClient(c)
-			timestamp = ""
-			broadcastMessage(fmt.Sprintf("\n %s has left our chat...", name), c, timestamp, name)
-			for _, client := range clients {
-				if client != c {
-					clientName, exists := clientNames[client]
-					if clientName != name && exists {
-						timestamp = time.Now().Format("2006-01-02 15:04:05")
-						client.Write([]byte(fmt.Sprintf("\n[%s][%s]: ", timestamp, clientName)))
-					}
-				}
-			}
-			return
-		}
-
-		// Ajouter l'horodatage et le nom du client au message
-
-		msg = strings.TrimSpace(msg)
-		fmt.Printf("Received message: %s from %s\n", message, c.RemoteAddr().String())
-		timestamp = time.Now().Format("2006-01-02 15:04:05")
-		broadcastMessage(msg, c, timestamp, name)
-		for _, client := range clients {
-			if client != c {
-				clientName, exists := clientNames[client]
-				if clientName != name && exists {
-					timestamp = time.Now().Format("2006-01-02 15:04:05")
-					client.Write([]byte(fmt.Sprintf("\n[%s][%s]: ", timestamp, clientName)))
-				}
-
 			}
 		}
 	}
 }
 
-// Diffuser un message à tous les clients sauf l'expéditeur
-func broadcastMessage(message string, sender net.Conn, timestamp string, name string) {
+func sendArchivedData(c net.Conn) {
+	archiveData, _ := os.ReadFile("archiveData.txt")
+	if len(archiveData) > 0 {
+		c.Write(archiveData)
+	}
+}
+
+func processClientMessage(c net.Conn) bool {
+	name := clientNames[c]
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	c.Write([]byte(fmt.Sprintf("[%s][%s]: ", timestamp, name)))
+
+	message, err := bufio.NewReader(c).ReadString('\n')
+	if err != nil {
+		fmt.Printf("%s disconnected.\n", name)
+		handleClientDisconnection(c, name, timestamp)
+		return false
+	}
+	b := true
+	if message == "" || containsInvalidChars(message) {
+		message = "invalid input!"
+		b = false
+	}
+	message = strings.TrimSpace(message)
+	if b {
+		archive += fmt.Sprintf("[%s][%s]: %s\n", timestamp, name, message)
+	}
+	broadcastMessage(message, c, timestamp)
+	isDuplicateName(name, c, timestamp)
+	return true
+}
+
+func containsInvalidChars(message string) bool {
+	for _, char := range message {
+		if char < 32 && char != 10 {
+			return true
+		}
+	}
+	return false
+}
+
+func handleClientDisconnection(c net.Conn, name string, timestamp string) {
+	removeClient(c)
+	broadcastMessage(fmt.Sprintf("\n%s has left our chat...", name), c, "")
+	timestamp = time.Now().Format("2006-01-02 15:04:05")
+	isDuplicateName(name, c, timestamp)
+}
+
+func broadcastMessage(message string, sender net.Conn, timestamp string) {
 	for _, client := range clients {
 		if timestamp == "" && client != sender {
 			clientName, exists := clientNames[client]
@@ -180,9 +200,11 @@ func broadcastMessage(message string, sender net.Conn, timestamp string, name st
 				client.Write([]byte(message))
 			}
 		} else if client != sender {
+			fmt.Println(clients[0], clients[1])
 			clientName, exists := clientNames[client]
 			if exists && clientName != "" {
 				client.Write([]byte(fmt.Sprintf("\n[%s][%s]: %s", timestamp, clientNames[sender], message)))
+				break
 			}
 		}
 	}
