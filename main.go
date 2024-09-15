@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -13,7 +14,8 @@ var (
 	clients     []net.Conn // Liste de tous les clients connectés
 	clientNames = make(map[net.Conn]string)
 	archive     string
-	timestamp   string
+	TimesIns    string
+	mutex       sync.Mutex // Mutex pour protéger l'accès aux ressources partagées
 )
 
 func main() {
@@ -36,8 +38,10 @@ func main() {
 			fmt.Println("Error accepting connection:", err)
 			continue
 		}
-
+		mutex.Lock()
 		clients = append(clients, conn)
+		mutex.Unlock()
+		fmt.Println(clients)
 		go handleConnection(conn)
 	}
 }
@@ -47,6 +51,9 @@ func getPort() string {
 	if len(os.Args) == 2 {
 		port = ":" + os.Args[1]
 		fmt.Printf("Listening on port %s\n", port)
+	} else {
+		fmt.Println("[USAGE]: ./TCPChat $port")
+		os.Exit(1)
 	}
 	return port
 }
@@ -59,14 +66,12 @@ func handleConnection(c net.Conn) {
 	defer c.Close()
 
 	sendWelcomeMessage(c)
-	if !handleClientName(c) {
-		return
-	}
+	handleClientName(c)
+
 	os.WriteFile("archiveData.txt", []byte((archive)), 0o644)
 	sendArchivedData(c)
 	fmt.Printf("Client %s connected\n", c.RemoteAddr().String())
 
-	// Gérer les messages du client
 	for {
 		if !processClientMessage(c) {
 			return
@@ -75,7 +80,7 @@ func handleConnection(c net.Conn) {
 }
 
 func checkChatRoomCapacity(c net.Conn) bool {
-	if len(clients) > 3 {
+	if len(clients) > 4 {
 		c.Write([]byte("Chat room is full. Try again later.\n"))
 		removeClient(c)
 		c.Close()
@@ -93,35 +98,45 @@ func sendWelcomeMessage(c net.Conn) {
 	c.Write(asciiArt)
 }
 
-func handleClientName(c net.Conn) bool {
+func handleClientName(c net.Conn) {
+	NbTry := 0
+ReName:
+	var err error
+	mutex.Lock()
 	c.Write([]byte("[ENTER YOUR NAME]: "))
 	name, _ := bufio.NewReader(c).ReadString('\n')
 	name = strings.TrimSpace(name)
 
 	if name == "" || !isValidName(name) {
-		c.Write([]byte("Invalid name!\n"))
-		removeClient(c)
-		c.Close()
-		return false
+		c.Write([]byte("We unfortunately don't allow empty names. Please give a valid name\n"))
+		err = fmt.Errorf("error")
 	}
-
-	clientNames[c] = name
-
 	for _, client := range clients {
 		if client != c {
 			clientName, exists := clientNames[client]
 			if clientName == name && exists {
-				c.Write([]byte("invalid name!\n"))
-				removeClient(c)
-				c.Close()
-				return false
+				c.Write([]byte("This name is already in use, please try another one\n"))
+				err = fmt.Errorf("error")
 			}
 		}
 	}
-	broadcastMessage(fmt.Sprintf("\n %s has joined our chat...", name), c, "")
-	timestamp = time.Now().Format("2006-01-02 15:04:05")
-	isDuplicateName(name, c, timestamp)
-	return true
+	mutex.Unlock()
+	if err != nil {
+		if NbTry < 2 {
+			NbTry++
+			goto ReName
+		} else {
+			removeClient(c)
+			c.Close()
+			return
+		}
+	}
+	mutex.Lock()
+	clientNames[c] = name
+	mutex.Unlock()
+	broadcastMessage(fmt.Sprintf("\n%s has joined our chat...", name), c, "")
+	TimesIns = time.Now().Format("2006-01-02 15:04:05")
+	AccesMsg(name, c, TimesIns)
 }
 
 func isValidName(name string) bool {
@@ -133,12 +148,12 @@ func isValidName(name string) bool {
 	return true
 }
 
-func isDuplicateName(name string, c net.Conn, timestamp string) {
+func AccesMsg(name string, c net.Conn, TimesIns string) {
 	for _, client := range clients {
 		if client != c {
 			clientName, exists := clientNames[client]
 			if clientName != name && exists {
-				client.Write([]byte(fmt.Sprintf("\n[%s][%s]: ", timestamp, clientName)))
+				client.Write([]byte(fmt.Sprintf("\n[%s][%s]:", TimesIns, clientName)))
 			}
 		}
 	}
@@ -153,13 +168,13 @@ func sendArchivedData(c net.Conn) {
 
 func processClientMessage(c net.Conn) bool {
 	name := clientNames[c]
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	c.Write([]byte(fmt.Sprintf("[%s][%s]: ", timestamp, name)))
+	TimesIns := time.Now().Format("2006-01-02 15:04:05")
+	c.Write([]byte(fmt.Sprintf("[%s][%s]:", TimesIns, name)))
 
 	message, err := bufio.NewReader(c).ReadString('\n')
 	if err != nil {
 		fmt.Printf("%s disconnected.\n", name)
-		handleClientDisconnection(c, name, timestamp)
+		handleClientDisconnection(c, name)
 		return false
 	}
 	b := true
@@ -169,42 +184,45 @@ func processClientMessage(c net.Conn) bool {
 	}
 	message = strings.TrimSpace(message)
 	if b {
-		archive += fmt.Sprintf("[%s][%s]: %s\n", timestamp, name, message)
+		mutex.Lock()
+		archive += fmt.Sprintf("[%s][%s]:%s\n", TimesIns, name, message)
+		mutex.Unlock()
 	}
-	broadcastMessage(message, c, timestamp)
-	isDuplicateName(name, c, timestamp)
+	broadcastMessage(message, c, TimesIns)
+	AccesMsg(name, c, TimesIns)
 	return true
 }
 
 func containsInvalidChars(message string) bool {
 	for _, char := range message {
-		if char < 32 && char != 10 {
+		if (char < 32 && char != 10) || (strings.TrimSpace(message) == "") {
 			return true
 		}
 	}
 	return false
 }
 
-func handleClientDisconnection(c net.Conn, name string, timestamp string) {
+func handleClientDisconnection(c net.Conn, name string) {
 	removeClient(c)
 	broadcastMessage(fmt.Sprintf("\n%s has left our chat...", name), c, "")
-	timestamp = time.Now().Format("2006-01-02 15:04:05")
-	isDuplicateName(name, c, timestamp)
+	TimesIns = time.Now().Format("2006-01-02 15:04:05")
+	AccesMsg(name, c, TimesIns)
 }
 
-func broadcastMessage(message string, sender net.Conn, timestamp string) {
+func broadcastMessage(message string, sender net.Conn, TimesIns string) {
+	// Verrouiller avant d'accéder à `clients` et `clientNames`
+	mutex.Lock()
+	defer mutex.Unlock() // Utilisation de `defer` pour garantir que le mutex est toujours libéré
 	for _, client := range clients {
-		if timestamp == "" && client != sender {
+		if TimesIns == "" && client != sender {
 			clientName, exists := clientNames[client]
 			if exists && clientName != "" {
 				client.Write([]byte(message))
 			}
 		} else if client != sender {
-			fmt.Println(clients[0], clients[1])
 			clientName, exists := clientNames[client]
 			if exists && clientName != "" {
-				client.Write([]byte(fmt.Sprintf("\n[%s][%s]: %s", timestamp, clientNames[sender], message)))
-				break
+				client.Write([]byte(fmt.Sprintf("\n[%s][%s]:%s", TimesIns, clientNames[sender], message)))
 			}
 		}
 	}
@@ -215,7 +233,6 @@ func removeClient(c net.Conn) {
 		if client == c {
 			clients = append(clients[:i], clients[i+1:]...)
 			delete(clientNames, c)
-			fmt.Println(clients)
 			break
 		}
 	}
